@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ミント・ラン ／ 1面：ミント草原</title>
+<style>
+  /* 画面全体のレイアウト（外部CSSなし） */
+  :root{
+    --bg:#0d1220; --panel:#151d31; --ink:#e8f0ff; --sub:#93a3c4;
+    --mint:#5ad1b0; --amber:#ffd166; --coral:#ef6f6c;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--ink)}
+  body{
+    font-family:"Hiragino Kaku Gothic ProN","Yu Gothic UI","Meiryo",system-ui,sans-serif;
+    display:flex;justify-content:center;padding:18px 14px 40px;
+  }
+  main{width:100%;max-width:1000px}
+  header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin:0 0 10px}
+  h1{font-size:22px;margin:0;letter-spacing:.06em}
+  h1 .dot{color:var(--mint)}
+  header p{margin:0;color:var(--sub);font-size:13px}
+  /* キャンバスは16:9を保ったまま画面幅に追従 */
+  .stage{
+    position:relative;width:100%;aspect-ratio:16/9;background:#0a0f1a;
+    border:2px solid #26345c;border-radius:14px;overflow:hidden;
+    box-shadow:0 18px 40px rgba(0,0,0,.45);
+  }
+  canvas{display:block;width:100%;height:100%}
+  /* 画面下の操作ボタン */
+  .pad{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+  .pad button{
+    flex:1 1 120px;min-height:66px;font-size:20px;font-weight:700;font-family:inherit;
+    color:var(--ink);background:linear-gradient(180deg,#22304f,#161f33);
+    border:2px solid #2f4166;border-radius:14px;cursor:pointer;
+    touch-action:none;user-select:none;-webkit-user-select:none;
+    transition:transform .05s, background .1s, border-color .1s;
+  }
+  .pad button:hover{border-color:#4a6da3}
+  .pad button.on,.pad button:active{
+    transform:translateY(2px);background:linear-gradient(180deg,#2f6d5c,#1c4438);border-color:var(--mint)
+  }
+  .pad button.small{flex:0 1 150px;font-size:16px;min-height:52px}
+  .pad button.go{background:linear-gradient(180deg,#2f6d5c,#163a30);border-color:#3f8f76}
+  .help{color:var(--sub);font-size:13px;line-height:1.75;margin:14px 0 0}
+  .help kbd{
+    background:#22304f;border:1px solid #3a4f78;border-bottom-width:2px;border-radius:5px;
+    padding:1px 6px;font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#dbe6ff
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>ミント<span class="dot">・</span>ラン</h1>
+    <p>1面：ミント草原 ／ オリジナル キャラクター（canvas の図形のみで描画）</p>
+  </header>
+
+  <div class="stage"><canvas id="game" width="960" height="540"></canvas></div>
+
+  <div class="pad">
+    <button id="btnLeft"  data-act="left"  aria-label="左へ移動">←</button>
+    <button id="btnRight" data-act="right" aria-label="右へ移動">→</button>
+    <button id="btnJump"  data-act="jump"  class="go" aria-label="ジャンプ">ジャンプ</button>
+    <button id="btnStart" data-act="start" class="small">▶ はじめる</button>
+    <button id="btnReset" data-act="reset" class="small">↺ やり直す (R)</button>
+    <button id="btnSound" data-act="sound" class="small">🔊 効果音</button>
+  </div>
+
+  <p class="help">
+    <kbd>←</kbd><kbd>→</kbd>（または <kbd>A</kbd><kbd>D</kbd>）で移動、
+    <kbd>Space</kbd> / <kbd>↑</kbd> / <kbd>W</kbd> でジャンプ。敵の上から踏むと倒せます。
+    穴に落ちたり横から敵に触れるとライフ減少（ライフ3）。右端のゴール旗に触れたらクリア。
+    ゲームオーバー後は <kbd>R</kbd> キーか「やり直す」ボタンで最初から。<br>
+    画面下のボタンはマウスクリックでもタップでも押せます。途中に目に見えないチェックポイントあり。
+  </p>
+</main>
+
+<script>
+'use strict';
+/* =========================================================
+   ミント・ラン — 1ファイルで完結する横スクロールアクション
+   画像・外部ライブラリ不使用。全て canvas の図形描画。
+   ========================================================= */
+
+/* ---------- 定数 ---------- */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const VIEW_W = canvas.width, VIEW_H = canvas.height;
+
+const LEVEL_W   = 5800;   // ステージ全長
+const GROUND_Y  = 470;    // 地面の上面
+const GROUND_H  = 70;     // 地面の厚さ
+const GRAVITY   = 2200;   // 重力加速度 px/s^2
+const MAX_FALL  = 1150;
+const ACCEL     = 1900;   // 水平加速
+const MAX_SPEED = 255;
+const FRICTION  = 1700;
+const JUMP_V    = 780;    // ジャンプ初速（約138px跳べる）
+const BOUNCE_V  = 520;    // 敵を踏んだときの跳ね返り
+const STEP      = 1/120;  // 固定タイムステップ
+const PW = 30, PH = 38;   // 主人公の当たり判定サイズ
+const START_X = 80;
+const TIME_LIMIT = 120;   // クリア時のタイムボーナス計算に使用
+
+/* ---------- ステージ定義 ---------- */
+// 地面の連続区間 [開始x, 幅]。ここが穴（ピット）の境界になる
+const GROUND_SPANS = [
+  [0,900],[1010,700],[1820,620],[2560,520],[3200,700],[4020,480],[4600,1200]
+];
+// 床ブロック [x, 上面y, 幅, 種類]
+const PLATFORM_DEF = [
+  [480,390,120,'crate'],[660,320,120,'crate'],[930,380,80,'crate'],
+  [1150,400,100,'crate'],[1290,330,100,'brick'],[1430,400,100,'crate'],
+  [1880,340,110,'brick'],[2010,340,110,'brick'],[2140,340,110,'brick'],
+  [2470,395,80,'crate'],
+  [2680,405,110,'crate'],[2810,335,110,'crate'],[2940,265,110,'brick'],
+  [3300,395,120,'crate'],[3470,330,120,'crate'],
+  [3600,345,240,'brick'],
+  [3930,385,70,'crate'],
+  [4250,400,110,'crate'],
+  [4680,395,110,'brick'],
+  [4880,400,90,'crate'],[4990,335,120,'crate'],[5140,270,120,'brick'],
+];
+// 敵 [開始x, 乗っている面のy, 巡回範囲左, 巡回範囲右]
+// 巡回範囲は穴（ピット）の縁から90px以上離し、着地地点に敵が居座って理不尽に死なないようにする
+const ENEMY_DEF = [
+  [350,GROUND_Y,260,560],[1150,GROUND_Y,1120,1300],[1500,GROUND_Y,1420,1620],
+  [2000,GROUND_Y,1830,2100],[2300,GROUND_Y,2150,2350],[2700,GROUND_Y,2650,2900],
+  [2950,GROUND_Y,2850,2990],[3400,GROUND_Y,3260,3560],[3700,GROUND_Y,3600,3780],
+  [4200,GROUND_Y,4030,4400],[4750,GROUND_Y,4660,5000],[5250,GROUND_Y,5050,5480],
+  [3700,345,3604,3796],   // レンガの上を歩く敵
+];
+// キラ星（コイン）[x, y]
+const COIN_DEF = [
+  [510,340],[555,300],[600,340],[690,270],[735,270],
+  [910,400],[950,350],[985,325],
+  [1200,350],[1340,280],[1480,350],
+  [1730,410],[1765,360],[1800,410],
+  [1935,290],[2065,290],[2195,290],
+  [2510,345],
+  [2735,355],[2865,285],[2995,215],
+  [3100,400],[3140,350],[3180,400],
+  [3360,345],[3530,280],
+  [3655,295],[3785,295],
+  [3920,395],[3960,345],[4000,395],
+  [4305,350],[4735,350],
+  [4520,400],[4560,350],
+  [4925,350],[5050,285],[5200,220],
+  [5350,420],[5420,420],[5490,420],
+];
+const CHECKPOINTS = [START_X, 1820, 3200, 4600];  // ライフ減少後の復帰地点
+const GOAL_X = 5620;                              // ゴール旗の位置
+
+/* ---------- 静的コリジョン領域を構築 ---------- */
+const solids = [];
+for (const [x,w] of GROUND_SPANS) solids.push({x, y:GROUND_Y, w, h:GROUND_H, type:'ground'});
+for (const [x,y,w,t] of PLATFORM_DEF) solids.push({x, y, w, h:26, type:t});
+
+/* ---------- 実行状態 ---------- */
+let state = 'title';        // title | play | clear | over
+let player, enemies, coins, cam, elapsed, score, coinCount, lives, checkpoint, hintT;
+const input = {left:false, right:false, jump:false};
+let jumpQueued = 0;         // ジャンプ入力の猶予（バッファ）
+
+function resetRun(){
+  player = {x:START_X, y:GROUND_Y-PH, w:PW, h:PH, vx:0, vy:0,
+            onGround:false, coyote:0, face:1, walk:0, invuln:0};
+  enemies = ENEMY_DEF.map(([x,surf,minX,maxX],i)=>({
+    x, y:surf-30, w:34, h:30, minX, maxX, dir:(i%2?-1:1), alive:true, squash:0, phase:i*0.7
+  }));
+  coins = COIN_DEF.map(([x,y],i)=>({x, y, taken:false, phase:i*0.41}));
+  cam = 0; elapsed = 0; score = 0; coinCount = 0; lives = 3;
+  checkpoint = START_X; hintT = 0; jumpQueued = 0;
+  input.left = input.right = input.jump = false;
+  syncPad();
+}
+
+/* ---------- 効果音（Web Audio、外部ファイルなし） ---------- */
+let audioCtx = null, soundOn = true;
+function sfx(kind){
+  if (!soundOn) return;
+  try{
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }catch(e){ return; }
+  const t0 = audioCtx.currentTime;
+  const map = {
+    jump:[420,760,0.16,'square',0.10], coin:[880,1320,0.12,'triangle',0.12],
+    stomp:[300,120,0.14,'square',0.12], hurt:[300,90,0.30,'sawtooth',0.12],
+    clear:[520,1040,0.55,'triangle',0.12], dead:[240,60,0.70,'sawtooth',0.12],
+  };
+  const p = map[kind]; if (!p) return;
+  const osc = audioCtx.createOscillator(), g = audioCtx.createGain();
+  osc.type = p[3];
+  osc.frequency.setValueAtTime(p[0], t0);
+  osc.frequency.exponentialRampToValueAtTime(Math.max(40,p[1]), t0+p[2]);
+  g.gain.setValueAtTime(p[4], t0);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0+p[2]);
+  osc.connect(g).connect(audioCtx.destination);
+  osc.start(t0); osc.stop(t0+p[2]+0.02);
+}
+
+/* ---------- 当たり判定のヘルパー ---------- */
+function overlap(a, b){
+  return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+}
+// 主人公のすぐ近くのコリジョンだけを対象にする（長い地面でも途中で見失わないよう幅で判定）
+function nearPlayer(s){
+  return s.x + s.w > player.x - 60 && s.x < player.x + PW + 60;
+}
+
+/* ---------- 1ステップ進める（固定長 dt） ---------- */
+function step(dt){
+  if (state !== 'play'){ if (state === 'clear') player.walk += dt*3; return; }
+  elapsed += dt;
+  if (player.invuln > 0) player.invuln -= dt;
+  if (hintT > 0) hintT -= dt;
+  if (jumpQueued > 0) jumpQueued -= dt;
+
+  /* --- 水平移動：加速と摩擦 --- */
+  const dir = (input.right?1:0) - (input.left?1:0);
+  if (dir > 0){ player.vx = Math.min(MAX_SPEED, player.vx + ACCEL*dt); player.face = 1; }
+  else if (dir < 0){ player.vx = Math.max(-MAX_SPEED, player.vx - ACCEL*dt); player.face = -1; }
+  else {
+    const f = FRICTION*dt;
+    player.vx = player.vx > 0 ? Math.max(0, player.vx-f) : Math.min(0, player.vx+f);
+  }
+
+  /* --- X軸の衝突解決 --- */
+  player.x += player.vx*dt;
+  for (const s of solids){
+    if (!nearPlayer(s)) continue;
+    if (overlap(player, s)){
+      if (player.vx > 0) player.x = s.x - PW;
+      else if (player.vx < 0) player.x = s.x + s.w;
+      player.vx = 0;
+    }
+  }
+  if (player.x < 0){ player.x = 0; player.vx = 0; }
+  if (player.x > LEVEL_W-PW){ player.x = LEVEL_W-PW; }
+
+  /* --- ジャンプ（コヨーテ時間と入力バッファ付き） --- */
+  if (player.onGround) player.coyote = 0.09; else player.coyote -= dt;
+  if (jumpQueued > 0 && (player.onGround || player.coyote > 0)){
+    player.vy = -JUMP_V; player.onGround = false; player.coyote = 0; jumpQueued = 0;
+    sfx('jump');
+  }
+
+  /* --- Y軸の衝突解決 --- */
+  player.vy = Math.min(MAX_FALL, player.vy + GRAVITY*dt);
+  player.y += player.vy*dt;
+  player.onGround = false;
+  for (const s of solids){
+    if (!nearPlayer(s)) continue;
+    if (overlap(player, s)){
+      if (player.vy > 0){ player.y = s.y - PH; player.vy = 0; player.onGround = true; }
+      else if (player.vy < 0){ player.y = s.y + s.h; player.vy = 0; }
+    }
+  }
+  player.walk += Math.abs(player.vx)*dt*0.05;
+
+  /* --- 敵：巡回とプレイヤーとの接触 --- */
+  for (const e of enemies){
+    if (!e.alive){ if (e.squash > 0) e.squash -= dt; continue; }
+    e.phase += dt*8;
+    e.x += e.dir*62*dt;
+    if (e.x < e.minX){ e.x = e.minX; e.dir = 1; }
+    if (e.x + e.w > e.maxX){ e.x = e.maxX - e.w; e.dir = -1; }
+    if (overlap(player, e)){
+      const feet = player.y + PH;
+      if (player.vy > 120 && feet <= e.y + e.h*0.6){        // 上から踏んだ
+        e.alive = false; e.squash = 0.35;
+        player.vy = -BOUNCE_V; score += 200; sfx('stomp');
+      } else hurt(e.x + e.w/2 < player.x + PW/2 ? 1 : -1);   // 横から接触
+    }
+  }
+
+  /* --- キラ星回収 --- */
+  for (const c of coins){
+    if (c.taken) continue;
+    c.phase += dt*4;
+    if (Math.abs(c.x-(player.x+PW/2)) < 22 && Math.abs(c.y-(player.y+PH/2)) < 24){
+      c.taken = true; coinCount++; score += 100; sfx('coin');
+    }
+  }
+
+  /* --- チェックポイント更新 --- */
+  for (const cx of CHECKPOINTS) if (player.x + PW/2 >= cx) checkpoint = Math.max(checkpoint, cx);
+
+  /* --- 穴に落ちた --- */
+  if (player.y > VIEW_H + 120) loseLife();
+
+  /* --- ゴール旗に到達 --- */
+  if (player.x + PW >= GOAL_X){
+    state = 'clear';
+    score += 1000 + Math.max(0, Math.floor((TIME_LIMIT-elapsed)*10));
+    player.vx = 0; sfx('clear'); syncPad();
+  }
+
+  /* --- カメラ（主人公を左寄りに固定） --- */
+  const target = player.x + PW/2 - VIEW_W*0.38;
+  cam += (target - cam) * 0.18;
+  cam = Math.max(0, Math.min(LEVEL_W - VIEW_W, cam));
+}
+
+/* ---------- 被弾・ライフ減少 ---------- */
+function hurt(knockDir){
+  if (player.invuln > 0 || state !== 'play') return;
+  lives--; sfx('hurt');
+  if (lives <= 0){ state = 'over'; sfx('dead'); syncPad(); return; }
+  player.invuln = 1.6;
+  player.vx = knockDir*190; player.vy = -330;
+  hintT = 1.2;
+}
+function loseLife(){
+  lives--; sfx('hurt');
+  if (lives <= 0){ state = 'over'; sfx('dead'); syncPad(); return; }
+  respawn();
+}
+function respawn(){
+  player.x = checkpoint; player.y = GROUND_Y - PH - 2;
+  player.vx = 0; player.vy = 0; player.invuln = 1.6; player.face = 1;
+  cam = Math.max(0, Math.min(LEVEL_W-VIEW_W, player.x - VIEW_W*0.38));
+}
+
+/* =========================================================
+   描画
+   ========================================================= */
+function rnd(i){ const x = Math.sin(i*127.1+311.7)*43758.5453; return x - Math.floor(x); }
+
+function rrect(x,y,w,h,r){
+  const rr = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+rr,y);
+  ctx.lineTo(x+w-rr,y); ctx.quadraticCurveTo(x+w,y,x+w,y+rr);
+  ctx.lineTo(x+w,y+h-rr); ctx.quadraticCurveTo(x+w,y+h,x+w-rr,y+h);
+  ctx.lineTo(x+rr,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-rr);
+  ctx.lineTo(x,y+rr); ctx.quadraticCurveTo(x,y,x+rr,y);
+  ctx.closePath(); ctx.fill();
+}
+
+/* 空・雲・遠景（パララックススクロール） */
+function drawSky(){
+  const g = ctx.createLinearGradient(0,0,0,VIEW_H);
+  g.addColorStop(0,'#1b2a52'); g.addColorStop(.45,'#3f6fa8'); g.addColorStop(.8,'#7fc3d8');
+  ctx.fillStyle = g; ctx.fillRect(0,0,VIEW_W,VIEW_H);
+
+  // 太陽
+  ctx.fillStyle = 'rgba(255,236,180,.95)';
+  ctx.beginPath(); ctx.arc(150,96,34,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,236,180,.18)';
+  ctx.beginPath(); ctx.arc(150,96,58,0,Math.PI*2); ctx.fill();
+
+  // 遠い山（視差0.25）
+  const base1 = cam*0.25;
+  ctx.fillStyle = '#31507f';
+  for (let i = Math.floor(base1/420)-1; i < base1/420+4; i++){
+    const x = i*420 - base1, h = 150 + rnd(i)*90;
+    ctx.beginPath(); ctx.moveTo(x-40,GROUND_Y); ctx.lineTo(x+150,GROUND_Y-h);
+    ctx.lineTo(x+340,GROUND_Y); ctx.closePath(); ctx.fill();
+  }
+  // 中間の丘（視差0.5）
+  const base2 = cam*0.5;
+  ctx.fillStyle = '#3d7f7a';
+  for (let i = Math.floor(base2/300)-1; i < base2/300+6; i++){
+    const x = i*300 - base2, r = 90 + rnd(i+40)*60;
+    ctx.beginPath(); ctx.arc(x+r, GROUND_Y+18, r, Math.PI, 0); ctx.fill();
+  }
+  // 雲（視差0.35）
+  ctx.fillStyle = 'rgba(255,255,255,.72)';
+  const base3 = cam*0.35;
+  for (let i = 0; i < 26; i++){
+    const x = i*300 + rnd(i)*140 - base3;
+    if (x < -160 || x > VIEW_W+160) continue;
+    const y = 46 + rnd(i+7)*130, s = 0.7 + rnd(i+13)*0.8;
+    for (const [dx,dy,rr] of [[0,0,26],[24,-8,20],[48,2,22],[-22,6,17]]){
+      ctx.beginPath(); ctx.arc(x+dx*s, y+dy*s, rr*s, 0, Math.PI*2); ctx.fill();
+    }
+  }
+}
+
+/* 地面と床ブロック */
+function drawGround(){
+  for (const s of solids){
+    if (s.x + s.w < cam-40 || s.x > cam+VIEW_W+40) continue;
+    if (s.type === 'ground'){
+      ctx.fillStyle = '#5a3f2a'; ctx.fillRect(s.x, s.y, s.w, s.h);      // 土
+      ctx.fillStyle = '#4f9a4f'; ctx.fillRect(s.x, s.y, s.w, 14);        // 草
+      ctx.fillStyle = '#69c069'; ctx.fillRect(s.x, s.y, s.w, 5);
+      ctx.fillStyle = 'rgba(0,0,0,.16)';
+      for (let x = Math.floor(s.x/34)*34; x < s.x+s.w; x += 34){        // 土の模様
+        if (x < s.x) continue;
+        ctx.fillRect(x+4, s.y+26, 12, 7); ctx.fillRect(x+18, s.y+46, 9, 6);
+      }
+      ctx.fillStyle = '#3f7f42';
+      for (let x = Math.floor(s.x/26)*26; x < s.x+s.w; x += 26){        // 草の葉
+        if (x < s.x) continue;
+        ctx.fillRect(x+6, s.y-5, 3, 6); ctx.fillRect(x+12, s.y-8, 3, 9);
+      }
+    } else {
+      const brick = s.type === 'brick';
+      ctx.fillStyle = brick ? '#b5613c' : '#c99a52';
+      ctx.fillRect(s.x, s.y, s.w, s.h);
+      ctx.fillStyle = brick ? '#d97e52' : '#e6bd7c';
+      ctx.fillRect(s.x, s.y, s.w, 6);
+      ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 2;
+      ctx.strokeRect(s.x+1, s.y+1, s.w-2, s.h-2);                        // 縁
+      ctx.beginPath();
+      for (let x = s.x+26; x < s.x+s.w-6; x += 26){ ctx.moveTo(x, s.y+2); ctx.lineTo(x, s.y+s.h-2); }
+      ctx.moveTo(s.x+2, s.y+13); ctx.lineTo(s.x+s.w-2, s.y+13);
+      ctx.stroke();
+    }
+  }
+}
+
+/* キラ星（収集物）*/
+function drawCoins(){
+  for (const c of coins){
+    if (c.taken || c.x < cam-40 || c.x > cam+VIEW_W+40) continue;
+    const spin = Math.max(0.18, Math.abs(Math.cos(c.phase)));   // 回転の擬似表現
+    ctx.save(); ctx.translate(c.x, c.y + Math.sin(c.phase*0.8)*3);
+    ctx.fillStyle = 'rgba(255,209,102,.25)';
+    ctx.beginPath(); ctx.arc(0,0,17,0,Math.PI*2); ctx.fill();
+    ctx.scale(spin, 1);
+    ctx.fillStyle = '#ffd166'; ctx.strokeStyle = '#c98f28'; ctx.lineWidth = 2;
+    star(0,0,5,13,5.5); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+}
+function star(cx,cy,points,R,r){                        // 星形の経路
+  ctx.beginPath();
+  for (let i=0;i<points*2;i++){
+    const rad = i%2 ? r : R, a = -Math.PI/2 + i*Math.PI/points;
+    const x = cx+Math.cos(a)*rad, y = cy+Math.sin(a)*rad;
+    i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+  }
+  ctx.closePath();
+}
+
+/* 敵：ドクグリ（トゲトゲの丸い生きもの） */
+function drawEnemies(){
+  for (const e of enemies){
+    if (e.x + e.w < cam-40 || e.x > cam+VIEW_W+40) continue;
+    if (!e.alive && e.squash <= 0) continue;
+    const cx = e.x + e.w/2, squash = e.alive ? 1 : Math.max(0.15, e.squash/0.35);
+    const h = e.h*squash, top = e.y + (e.h-h);
+    ctx.save(); ctx.translate(cx, 0);
+    if (e.alive){                                            // トゲ
+      ctx.fillStyle = '#6b3f7a';
+      for (let i=0;i<7;i++){
+        const a = Math.PI + (i+0.5)*Math.PI/7;
+        const bx = Math.cos(a)*(e.w/2-2), by = top + e.h/2 + Math.sin(a)*(h/2-2);
+        ctx.beginPath();
+        ctx.moveTo(bx-Math.cos(a)*4, by-Math.sin(a)*3);
+        ctx.lineTo(bx-Math.cos(a)*13, by-Math.sin(a)*11);
+        ctx.lineTo(bx+Math.cos(a)*4, by-Math.sin(a)*3);
+        ctx.closePath(); ctx.fill();
+      }
+    }
+    ctx.fillStyle = e.alive ? '#8e54a6' : '#8e54a6';
+    ctx.strokeStyle = '#43245a'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(0, top+h/2, e.w/2, h/2, 0, 0, Math.PI*2);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.18)';                // 艶
+    ctx.beginPath(); ctx.ellipse(-6, top+h*0.28, e.w/4, h/5, 0, 0, Math.PI*2); ctx.fill();
+    if (e.alive){                                            // 目と足
+      const wob = Math.sin(e.phase)*3, d = e.dir;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(-7, top+h*0.42, 5.5, 0, Math.PI*2);
+      ctx.arc( 7, top+h*0.42, 5.5, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#1d1030';
+      ctx.beginPath(); ctx.arc(-7+d*2, top+h*0.42+wob*0.2, 2.6, 0, Math.PI*2);
+      ctx.arc( 7+d*2, top+h*0.42+wob*0.2, 2.6, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#43245a';
+      ctx.fillRect(-11+wob, e.y+e.h-4, 9, 5); ctx.fillRect(3-wob, e.y+e.h-4, 9, 5);
+    } else {                                                 // 潰れたとき
+      ctx.strokeStyle = '#43245a'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(-6,top+3); ctx.lineTo(-2,top+7);
+      ctx.moveTo(-2,top+3); ctx.lineTo(-6,top+7);
+      ctx.moveTo(3,top+3); ctx.lineTo(7,top+7); ctx.moveTo(7,top+3); ctx.lineTo(3,top+7);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+/* 主人公：機械キツネ「ミント」 */
+function drawPlayer(){
+  if (player.invuln > 0 && Math.floor(player.invuln*12)%2 === 0) return;  // 無敵中は点滅
+  const cx = player.x + PW/2, bottom = player.y + PH, f = player.face;
+  const air = !player.onGround;
+  const swing = air ? 0 : Math.sin(player.walk*Math.PI)*4;
+  ctx.save(); ctx.translate(cx, bottom); ctx.scale(f, 1);
+
+  // 尾
+  ctx.fillStyle = '#3fae91';
+  ctx.beginPath(); ctx.moveTo(-12,-22);
+  ctx.quadraticCurveTo(-30,-30-Math.sin(player.walk*2)*3,-26,-8);
+  ctx.quadraticCurveTo(-19,-12,-10,-16); ctx.closePath(); ctx.fill();
+  // 脚（接地時は歩行サイクルで前後に振る）
+  ctx.fillStyle = '#2f7c68';
+  const legL = air ? -4 : swing, legR = air ? 4 : -swing;
+  rrect(-11+legL, -10, 8, 10, 3);
+  rrect(  3+legR, -10, 8, 10, 3);
+  // 胴体
+  ctx.fillStyle = '#5ad1b0'; ctx.strokeStyle = '#1f5f50'; ctx.lineWidth = 2;
+  rrect(-13,-26,26,18,7);
+  rrectPath(-13,-26,26,18,7); ctx.stroke();
+  // スカーフ
+  ctx.fillStyle = '#ef6f6c';
+  ctx.beginPath(); ctx.moveTo(-13,-26); ctx.lineTo(13,-26);
+  ctx.lineTo(11,-21); ctx.lineTo(-11,-21); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-10,-24); ctx.quadraticCurveTo(-24,-18-Math.sin(player.walk*3)*4,-20,-6);
+  ctx.lineTo(-13,-14); ctx.closePath(); ctx.fill();
+  // 頭
+  ctx.fillStyle = '#7fe0c4';
+  ctx.beginPath(); ctx.arc(4,-36,12,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#1f5f50'; ctx.stroke();
+  // 耳
+  ctx.fillStyle = '#5ad1b0';
+  ctx.beginPath(); ctx.moveTo(-4,-44); ctx.lineTo(1,-56); ctx.lineTo(6,-44); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(8,-45); ctx.lineTo(14,-54); ctx.lineTo(16,-43); ctx.closePath(); ctx.fill();
+  // 鼻面と目
+  ctx.fillStyle = '#eafff8';
+  ctx.beginPath(); ctx.ellipse(11,-33,5,4,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#12312c';
+  ctx.beginPath(); ctx.arc(14,-34,1.7,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(6,-38,2.4,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(13,-38,2.4,0,Math.PI*2); ctx.fill();
+  // アンテナ
+  ctx.strokeStyle = '#1f5f50'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(4,-48); ctx.lineTo(7,-58); ctx.stroke();
+  ctx.fillStyle = player.onGround ? '#ffd166' : '#fff2b0';
+  ctx.beginPath(); ctx.arc(7,-60,3.6,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function rrectPath(x,y,w,h,r){                       // rrect と同じ経路を stroke 用に
+  const rr = Math.min(r,w/2,h/2);
+  ctx.beginPath(); ctx.moveTo(x+rr,y);
+  ctx.lineTo(x+w-rr,y); ctx.quadraticCurveTo(x+w,y,x+w,y+rr);
+  ctx.lineTo(x+w,y+h-rr); ctx.quadraticCurveTo(x+w,y+h,x+w-rr,y+h);
+  ctx.lineTo(x+rr,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-rr);
+  ctx.lineTo(x,y+rr); ctx.quadraticCurveTo(x,y,x+rr,y); ctx.closePath();
+}
+
+/* ゴール旗 */
+function drawGoal(){
+  if (GOAL_X < cam-120 || GOAL_X > cam+VIEW_W+160) return;
+  const topY = GROUND_Y-230;
+  ctx.fillStyle = '#3a4a63'; ctx.fillRect(GOAL_X, topY, 8, 230);        // 支柱
+  ctx.fillStyle = '#8fa4c8'; ctx.fillRect(GOAL_X, topY, 3, 230);
+  ctx.fillStyle = '#ffd166';                                                // 天球
+  ctx.beginPath(); ctx.arc(GOAL_X+4, topY-6, 9, 0, Math.PI*2); ctx.fill();
+  const t = performance.now()/1000;                                        // 揺れる旗
+  ctx.fillStyle = '#ef6f6c';
+  ctx.beginPath();
+  ctx.moveTo(GOAL_X+8, topY+10);
+  ctx.quadraticCurveTo(GOAL_X+52, topY+2+Math.sin(t*3)*6, GOAL_X+96, topY+16);
+  ctx.lineTo(GOAL_X+96, topY+58);
+  ctx.quadraticCurveTo(GOAL_X+52, topY+70+Math.sin(t*3)*6, GOAL_X+8, topY+62);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#fff';                                                  // 旗の星
+  ctx.save(); ctx.translate(GOAL_X+54, topY+37); star(0,0,5,13,6); ctx.fill(); ctx.restore();
+  ctx.fillStyle = '#2c3a52';                                               // 台
+  ctx.fillRect(GOAL_X-14, GROUND_Y-10, 36, 10);
+  ctx.fillStyle = '#dce8ff';                                               // 標識
+  ctx.font = 'bold 13px ui-monospace,Consolas,monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('GOAL', GOAL_X+4, GROUND_Y-246);
+  ctx.textAlign = 'left';
+}
+
+/* HUD（スコア・キラ星・ライフ・タイム） */
+function drawHUD(){
+  ctx.fillStyle = 'rgba(9,14,26,.55)';
+  rrect(14,12,VIEW_W-28,44,12);
+  ctx.font = 'bold 19px ui-monospace,Consolas,monospace';
+  ctx.fillStyle = '#e8f0ff';
+  ctx.fillText('SCORE ' + String(score).padStart(6,'0'), 30, 41);
+  ctx.fillStyle = '#ffd166';
+  star(208, 33, 5, 9, 4.4); ctx.fill();
+  ctx.fillStyle = '#e8f0ff';
+  ctx.fillText('x ' + coinCount + '/' + coins.length, 224, 41);
+  ctx.fillStyle = '#93a3c4';
+  ctx.fillText('TIME ' + elapsed.toFixed(1), 340, 41);
+  ctx.fillStyle = '#e8f0ff';
+  ctx.fillText('LIFE', 480, 41);
+  for (let i=0;i<3;i++){                                   // ライフはミントの顔で表示
+    const x = 545 + i*30;
+    ctx.fillStyle = i < lives ? '#7fe0c4' : 'rgba(255,255,255,.14)';
+    ctx.beginPath(); ctx.arc(x, 33, 10, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x-7,26); ctx.lineTo(x-3,16); ctx.lineTo(x+1,26); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x+2,26); ctx.lineTo(x+6,16); ctx.lineTo(x+9,26); ctx.closePath(); ctx.fill();
+    if (i < lives){
+      ctx.fillStyle = '#12312c';
+      ctx.beginPath(); ctx.arc(x-3,32,2,0,Math.PI*2); ctx.arc(x+4,32,2,0,Math.PI*2); ctx.fill();
+    }
+  }
+  // 進捗バー
+  const p = Math.max(0, Math.min(1, player.x / GOAL_X));
+  ctx.fillStyle = 'rgba(255,255,255,.18)'; rrect(660,24,270,16,8);
+  ctx.fillStyle = '#5ad1b0'; rrect(660,24,Math.max(6,270*p),16,8);
+  ctx.fillStyle = '#ffd166'; ctx.beginPath(); ctx.arc(660+270*p, 32, 5, 0, Math.PI*2); ctx.fill();
+
+  if (hintT > 0){
+    ctx.fillStyle = 'rgba(255,255,255,'+Math.min(1,hintT)+')';
+    ctx.font = 'bold 16px system-ui,sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('敵は上から踏もう！ 横から当たるとミス', VIEW_W/2, 96);
+    ctx.textAlign = 'left';
+  }
+}
+
+/* タイトル／クリア／ゲームオーバーの重なる画面 */
+function drawOverlay(){
+  if (state === 'play') return;
+  ctx.fillStyle = 'rgba(6,10,20,.72)'; ctx.fillRect(0,0,VIEW_W,VIEW_H);
+  ctx.textAlign = 'center';
+  const cx = VIEW_W/2;
+  if (state === 'title'){
+    ctx.fillStyle = '#5ad1b0'; ctx.font = 'bold 56px system-ui,sans-serif';
+    ctx.fillText('ミント・ラン', cx, 170);
+    ctx.fillStyle = '#e8f0ff'; ctx.font = 'bold 22px system-ui,sans-serif';
+    ctx.fillText('1面：ミント草原', cx, 208);
+    ctx.fillStyle = '#93a3c4'; ctx.font = '16px system-ui,sans-serif';
+    ctx.fillText('← → で移動 ／ Space・↑ でジャンプ ／ 敵は上から踏む', cx, 258);
+    ctx.fillText('穴に落ちたらミス。キラ星を集めて右端のゴール旗へ。ライフ3', cx, 286);
+    ctx.fillStyle = '#ffd166'; ctx.font = 'bold 24px system-ui,sans-serif';
+    ctx.fillText(Math.floor(performance.now()/500)%2 ? '▶ を押してスタート' : '　', cx, 350);
+  } else if (state === 'clear'){
+    ctx.fillStyle = '#ffd166'; ctx.font = 'bold 52px system-ui,sans-serif';
+    ctx.fillText('ステージクリア！', cx, 180);
+    ctx.fillStyle = '#e8f0ff'; ctx.font = 'bold 24px ui-monospace,Consolas,monospace';
+    ctx.fillText('SCORE  ' + score, cx, 240);
+    ctx.fillStyle = '#93a3c4'; ctx.font = '18px ui-monospace,Consolas,monospace';
+    ctx.fillText('TIME ' + elapsed.toFixed(1) + ' 秒   キラ星 ' + coinCount + '/' + coins.length +
+                '   残ライフ ' + lives, cx, 274);
+    ctx.fillStyle = '#5ad1b0'; ctx.font = 'bold 20px system-ui,sans-serif';
+    ctx.fillText('R キーまたは「やり直す」ボタンで最初から', cx, 340);
+  } else {
+    ctx.fillStyle = '#ef6f6c'; ctx.font = 'bold 52px system-ui,sans-serif';
+    ctx.fillText('ゲームオーバー', cx, 190);
+    ctx.fillStyle = '#e8f0ff'; ctx.font = 'bold 22px ui-monospace,Consolas,monospace';
+    ctx.fillText('SCORE ' + score + '   キラ星 ' + coinCount + '/' + coins.length, cx, 244);
+    ctx.fillStyle = '#ffd166'; ctx.font = 'bold 22px system-ui,sans-serif';
+    ctx.fillText('R キーまたは「やり直す」ボタンでリトライ', cx, 310);
+  }
+  ctx.textAlign = 'left';
+}
+
+function render(){
+  drawSky();
+  ctx.save();
+  ctx.translate(-Math.round(cam), 0);
+  drawGround(); drawGoal(); drawCoins(); drawEnemies(); drawPlayer();
+  ctx.restore();
+  drawHUD();
+  drawOverlay();
+}
+
+/* ---------- メインループ ---------- */
+let last = performance.now(), acc = 0;
+function frame(now){
+  acc += Math.min(0.1, (now - last)/1000); last = now;
+  while (acc >= STEP){ step(STEP); acc -= STEP; }
+  render();
+  requestAnimationFrame(frame);
+}
+
+/* ---------- 入力：キーボード ---------- */
+const KEYS_L = ['ArrowLeft','a','A'], KEYS_R = ['ArrowRight','d','D'],
+      KEYS_J = [' ','Space','ArrowUp','w','W','Spacebar'];
+window.addEventListener('keydown', e=>{
+  const k = e.key;
+  if (KEYS_L.includes(k) || KEYS_R.includes(k) || KEYS_J.includes(k)){ e.preventDefault(); }
+  if (KEYS_L.includes(k)) input.left = true;
+  else if (KEYS_R.includes(k)) input.right = true;
+  else if (KEYS_J.includes(k)){ if (!e.repeat) jumpQueued = 0.12; input.jump = true; }
+  else if (k === 'r' || k === 'R'){ resetRun(); state = 'play'; sfx('coin'); }
+  else if (k === 'Enter'){ startOrRestart(); }
+});
+window.addEventListener('keyup', e=>{
+  const k = e.key;
+  if (KEYS_L.includes(k)) input.left = false;
+  else if (KEYS_R.includes(k)) input.right = false;
+  else if (KEYS_J.includes(k)){
+    input.jump = false;
+    if (player && player.vy < -220) player.vy = -220;      // 長押し解除で跳躍高さを調整
+  }
+});
+
+/* ---------- 入力：画面下のボタン ---------- */
+const padEls = {};
+function bindHold(el, key){
+  padEls[key] = el;
+  const down = e => {
+    e.preventDefault(); el.classList.add('on');
+    if (el.setPointerCapture && e.pointerId != null) { try{ el.setPointerCapture(e.pointerId); }catch(_){} }
+    if (key === 'jump'){ if (state !== 'play') startOrRestart(); else jumpQueued = 0.12; input.jump = true; }
+    else input[key] = true;
+  };
+  const up = e => {
+    if (e && e.preventDefault) e.preventDefault();
+    el.classList.remove('on');
+    if (key === 'jump'){ input.jump = false; if (player && player.vy < -220) player.vy = -220; }
+    else input[key] = false;
+  };
+  el.addEventListener('pointerdown', down);
+  el.addEventListener('pointerup', up);
+  el.addEventListener('pointercancel', up);
+  el.addEventListener('lostpointercapture', up);
+  el.addEventListener('contextmenu', e=>e.preventDefault());
+}
+function bindClick(el, key, fn){
+  padEls[key] = el;
+  el.addEventListener('click', e=>{ e.preventDefault(); fn(); });
+}
+
+function startOrRestart(){
+  if (state === 'title'){ state = 'play'; sfx('coin'); syncPad(); }
+  else if (state === 'clear' || state === 'over'){ resetRun(); state = 'play'; sfx('coin'); }
+}
+function syncPad(){
+  if (padEls.start) padEls.start.textContent = state === 'play' ? '▶ 走行中…' : '▶ はじめる';
+  if (padEls.sound) padEls.sound.textContent = soundOn ? '🔊 効果音' : '🔇 ミュート';
+}
+
+bindHold(document.querySelector('[data-act="left"]'), 'left');
+bindHold(document.querySelector('[data-act="right"]'), 'right');
+bindHold(document.querySelector('[data-act="jump"]'), 'jump');
+bindClick(document.querySelector('[data-act="start"]'), 'start', startOrRestart);
+bindClick(document.querySelector('[data-act="reset"]'), 'reset', ()=>{ resetRun(); state = 'play'; sfx('coin'); });
+bindClick(document.querySelector('[data-act="sound"]'), 'sound', ()=>{ soundOn = !soundOn; syncPad(); });
+
+/* ---------- 起動 ---------- */
+resetRun();
+state = 'title';
+syncPad();
+requestAnimationFrame(frame);
+
+/* 自動テスト用に内部状態へアクセスできる口を開けておく（遊びには不要） */
+window.MINT_TEST = {
+  step, input, resetRun, startOrRestart, solids,
+  get state(){ return state; }, set state(v){ state = v; },
+  get player(){ return player; }, get stats(){ return {score, coinCount, lives, elapsed}; },
+  get enemies(){ return enemies; }, get coins(){ return coins; }, GOAL_X,
+};
+</script>
+</body>
+</html>
